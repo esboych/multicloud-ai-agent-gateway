@@ -1,0 +1,97 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: multicloud-ai-agent-gateway
+  namespace: agent-gateway
+  labels:
+    app.kubernetes.io/name: multicloud-ai-agent-gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: multicloud-ai-agent-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: multicloud-ai-agent-gateway
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: multicloud-ai-agent-gateway
+      automountServiceAccountToken: false
+      containers:
+        - name: gateway
+          image: myregistry.azurecr.io/multicloud-ai-agent-gateway:20260714-foundry-fallback-v01
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: multicloud-ai-agent-gateway-config
+          env:
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: /etc/gcp-wif/credential-configuration.json
+            - name: GOOGLE_CLOUD_PROJECT
+              value: my-gcp-project
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsGroup: 10001
+            runAsNonRoot: true
+            runAsUser: 10001
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: azure-identity-token
+              mountPath: /var/run/secrets/azure/tokens
+              readOnly: true
+            - name: gcp-identity-token
+              mountPath: /var/run/secrets/gcp/tokens
+              readOnly: true
+            - name: gcp-wif-credential-config
+              mountPath: /etc/gcp-wif
+              readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: azure-identity-token
+          projected:
+            defaultMode: 420
+            sources:
+              - serviceAccountToken:
+                  audience: api://AzureADTokenExchange
+                  expirationSeconds: 3600
+                  path: azure-identity-token
+        - name: gcp-identity-token
+          projected:
+            defaultMode: 420
+            sources:
+              - serviceAccountToken:
+                  audience: //iam.googleapis.com/projects/987654321098/locations/global/workloadIdentityPools/aks-agent-gateway/providers/aks-oidc
+                  expirationSeconds: 3600
+                  path: gcp-identity-token
+        - name: gcp-wif-credential-config
+          configMap:
+            name: multicloud-ai-agent-gateway-gcp-wif

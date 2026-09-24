@@ -1,0 +1,46 @@
+# Optional: included via overlay only when the cluster has a NetworkPolicy
+# enforcer (Calico, Cilium). Skipped from base/kustomization.yaml so a plain
+# `kubectl apply -k` works on clusters without one.
+#
+# To enable:
+#   kubectl apply -f aks/multicloud-ai-agent-gateway/k8s/networkpolicy.yaml
+#
+# Allows ingress only from pods in the same namespace and DNS lookups +
+# HTTPS egress. Egress is not host-restricted because NetworkPolicy is
+# IP/port-based and Foundry/AWS endpoints resolve to many IPs; a cluster
+# with Cilium can tighten this with FQDN-based policies.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: multicloud-ai-agent-gateway
+  namespace: agent-gateway
+  labels:
+    app.kubernetes.io/name: multicloud-ai-agent-gateway
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: multicloud-ai-agent-gateway
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: agent-gateway
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - ports:
+        - protocol: TCP
+          port: 443

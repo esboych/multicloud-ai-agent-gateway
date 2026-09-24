@@ -1,0 +1,71 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "multicloud-ai-agent-gateway"
+version = "0.1.0"
+description = "One internal API in front of AI agents hosted on Microsoft Foundry, AWS Bedrock AgentCore and Google Cloud, with workload-identity auth to all three."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "esboych" }]
+requires-python = ">=3.11"
+keywords = ["ai-agents", "gateway", "azure-foundry", "bedrock-agentcore", "gcp", "workload-identity", "fastapi", "multicloud"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Framework :: FastAPI",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
+  "Topic :: System :: Networking",
+]
+dependencies = [
+  "fastapi>=0.110",
+  "uvicorn[standard]>=0.27",
+  "pydantic>=2.6",
+  "pydantic-settings>=2.2",
+  # azure-ai-projects 2.x: the gateway uses the Responses API + agent_reference
+  # extension. Exact versions for container builds live in constraints.txt.
+  "azure-ai-projects>=2.0.0b4",
+  "azure-identity>=1.17.0",
+  "boto3>=1.34",
+  "google-auth>=2.30",
+  "google-cloud-bigquery>=3.25",
+  "google-cloud-asset>=3.26",
+  # Optional LLM tie-breaker for the hybrid router. The class is import-lazy
+  # in core/llm_router.py so the package still works if openai is missing,
+  # but having it in main deps keeps the container image self-contained.
+  "openai>=1.40",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.23",
+  "httpx>=0.27",
+  "ruff>=0.5",
+]
+
+[project.scripts]
+multicloud-ai-agent-gateway = "multicloud_ai_agent_gateway.__main__:main"
+agent-chat-ui = "agent_chat_ui.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [".venv", "infra"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501", "E731", "E741"]

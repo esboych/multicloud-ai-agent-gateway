@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-chat-ui
+  namespace: agent-gateway
+  labels:
+    app.kubernetes.io/name: agent-chat-ui
+spec:
+  # Internal only. The UI carries a password login over plain HTTP, so it must
+  # never be exposed directly: reach it with `kubectl port-forward` for a demo,
+  # or put a TLS-terminating ingress in front and set AUTH_COOKIE_SECURE=true.
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: agent-chat-ui
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

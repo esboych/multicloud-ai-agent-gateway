@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: multicloud-ai-agent-gateway
+  namespace: agent-gateway
+  labels:
+    app.kubernetes.io/name: multicloud-ai-agent-gateway
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: multicloud-ai-agent-gateway
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

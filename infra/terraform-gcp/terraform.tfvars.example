@@ -1,0 +1,22 @@
+project_id         = "my-gcp-project"
+billing_account_id = "XXXXXX-XXXXXX-XXXXXX"
+region             = "europe-west1"
+bigquery_location  = "EU"
+storage_location   = "EU"
+
+# Enable after fetching the AKS issuer:
+#   az aks show -g <rg> -n <cluster> --query oidcIssuerProfile.issuerUrl -o tsv
+enable_aks_workload_identity_federation = false
+aks_oidc_issuer_url                     = ""
+aks_k8s_namespace                       = "agent-gateway"
+aks_k8s_service_account                 = "multicloud-ai-agent-gateway"
+additional_aks_k8s_service_accounts     = []
+
+monthly_budget_units = 50
+budget_currency      = "EUR"
+
+deploy_gateway_cloud_run      = true
+gateway_cloud_run_service_name = "agent-gateway-gcp"
+gateway_container_image        = "europe-west1-docker.pkg.dev/my-gcp-project/agent-gateway/multicloud-ai-agent-gateway-gcp:latest"
+gateway_invokers               = ["user:user@example.com"]
+gateway_oidc_token_creators    = ["user:user@example.com"]

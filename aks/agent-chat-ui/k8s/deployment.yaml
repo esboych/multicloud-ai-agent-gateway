@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-chat-ui
+  namespace: agent-gateway
+  labels:
+    app.kubernetes.io/name: agent-chat-ui
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agent-chat-ui
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agent-chat-ui
+    spec:
+      serviceAccountName: agent-chat-ui
+      automountServiceAccountToken: false
+      containers:
+        - name: chat-ui
+          image: myregistry.azurecr.io/agent-chat-ui:20260512-2014
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: agent-chat-ui-config
+            - secretRef:
+                name: agent-chat-ui-auth
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsGroup: 10001
+            runAsNonRoot: true
+            runAsUser: 10001
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

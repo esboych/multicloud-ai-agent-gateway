@@ -1,0 +1,23 @@
+aws_region = "us-west-2"
+
+# Get this with:
+#   az aks show -g <rg> -n <cluster> --query oidcIssuerProfile.issuerURL -o tsv
+aks_oidc_issuer_url = "https://eastus2.oic.prod-aks.azure.com/00000000-0000-0000-0000-000000000000/00000000-0000-0000-0000-000000000000/"
+
+k8s_namespace       = "agent-gateway"
+k8s_service_account = "multicloud-ai-agent-gateway"
+
+# Initial bring-up: allow all runtimes in the account.
+# Replace with concrete ARNs before production:
+#   ["arn:aws:bedrock-agentcore:us-west-2:123456789012:runtime/abc123"]
+agentcore_runtime_arns = ["*"]
+
+allow_user_id_propagation = false
+
+# Set to false on first apply if you have not yet validated the `sub` claim
+# emitted by AAD for this App Registration; flip back to true after.
+restrict_to_service_principal_subject = true
+
+tags = {
+  Owner = "platform-team"
+}

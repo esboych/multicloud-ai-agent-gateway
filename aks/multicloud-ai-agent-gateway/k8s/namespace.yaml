@@ -1,0 +1,6 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agent-gateway
+  labels:
+    app.kubernetes.io/part-of: multicloud-ai-agent-gateway

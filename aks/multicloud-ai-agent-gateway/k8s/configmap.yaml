@@ -1,0 +1,108 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: multicloud-ai-agent-gateway-config
+  namespace: agent-gateway
+  labels:
+    app.kubernetes.io/name: multicloud-ai-agent-gateway
+data:
+  # --- Gateway runtime ----------------------------------------------------
+  GATEWAY_FOUNDRY_PROJECT_ENDPOINT: https://my-foundry.services.ai.azure.com/api/projects/my-agents-project
+  # Only if your Foundry agents call tools; the module must be installed in
+  # the image (see aks/multicloud-ai-agent-gateway/README.md, examples/dispatcher_stub.py).
+  # GATEWAY_FOUNDRY_DISPATCHER_PATH: my_tools.dispatcher:dispatch_function_call
+  GATEWAY_FOUNDRY_MAX_TOOL_ROUNDS: "5"
+  GATEWAY_FOUNDRY_REQUEST_TIMEOUT_SECONDS: "900"
+  GATEWAY_FOUNDRY_MODEL_FALLBACK_ENABLED: "true"
+  GATEWAY_FOUNDRY_FALLBACK_AGENTS_JSON: |
+    {
+      "AzureFinOpsAgent": "AzureFinOpsAgentMini",
+      "AzureMLTrainingAgent": "AzureMLTrainingAgentMini"
+    }
+  GATEWAY_HEALTH_PORT: "8080"
+  GATEWAY_LOG_LEVEL: INFO
+  # AutoRouter: BM25 fast path with Azure OpenAI tie-break only for
+  # low-confidence / ambiguous prompts. Auth uses the pod's AZURE_* workload
+  # identity env vars below; no API key is stored in the ConfigMap.
+  GATEWAY_ROUTER_MODE: hybrid
+  GATEWAY_ROUTER_LLM_ENDPOINT: https://my-foundry.openai.azure.com/
+  GATEWAY_ROUTER_LLM_DEPLOYMENT: gpt-4o
+  GATEWAY_ROUTER_LLM_API_VERSION: 2024-08-01-preview
+  GATEWAY_ROUTER_LLM_TIMEOUT_SECONDS: "5"
+  # Phase-1 router (BM25 + LLM hybrid) reads tags + example_prompts to score
+  # relevance. Pick discriminating tokens here: the BM25 router rewards rare
+  # words and penalises ones that show up in every agent. Keep tags short
+  # and stable; example_prompts can be verbose - they exist precisely to
+  # give the classifier prototypical phrasings to match against.
+  GATEWAY_AGENTS_JSON: |
+    [
+      {
+        "name": "AzureFinOpsAgent",
+        "backend_id": "foundry",
+        "description": "Read-only Azure cost and resource investigation agent.",
+        "foundry_agent_name": "AzureFinOpsAgent",
+        "tags": ["azure", "finops", "cost", "spend", "billing", "resource-group", "subscription"],
+        "example_prompts": [
+          "Show current month Azure costs and top cost drivers.",
+          "What changed in Azure spend and which resources should I inspect first?",
+          "Find storage account cost risks in my Azure subscription."
+        ]
+      },
+      {
+        "name": "AzureMLTrainingAgent",
+        "backend_id": "foundry",
+        "description": "Constrained Azure Machine Learning training job agent.",
+        "foundry_agent_name": "AzureMLTrainingAgent",
+        "tags": ["azure", "azureml", "ml", "training", "job", "workspace", "cpu-cluster", "pytorch"],
+        "example_prompts": [
+          "List recent Azure ML training jobs and summarize their statuses.",
+          "Submit a PyTorch training experiment to my workspace.",
+          "Start an Azure ML training job on cpu-cluster."
+        ]
+      },
+      {
+        "name": "GcpAgent",
+        "backend_id": "gcp-direct",
+        "description": "Single GCP agent. Routes Google Cloud cost, billing, asset inventory, and resource questions to deterministic GCP tools.",
+        "direct_handler": "gcp_agent",
+        "tags": ["gcp", "google", "google-cloud", "finops", "cost", "costs", "spend", "spending", "bill", "billing", "bigquery", "month", "current", "service", "services", "breakdown", "report", "summary", "top", "drivers", "asset", "assets", "inventory", "resources", "buckets", "storage", "cloud-run", "vertex", "gke", "deterministic", "no-llm"],
+        "example_prompts": [
+          "Show current month GCP costs",
+          "Show current month Google Cloud costs and top cost drivers",
+          "What are my GCP costs this month",
+          "Google Cloud cost breakdown by service",
+          "List GCP resources",
+          "Show Google Cloud asset inventory",
+          "What resources exist in my GCP project",
+          "Summarize GCP assets by type",
+          "Give me a GCP overview"
+        ]
+      }
+    ]
+  # --- Pod workload identity (Azure) ------------------------------------
+  # AZURE_CLIENT_ID / AZURE_TENANT_ID / AZURE_FEDERATED_TOKEN_FILE are set
+  # explicitly here because not every AKS cluster runs the Azure Workload
+  # Identity admission webhook (see docs/lessons-learned.md).
+  # They feed DefaultAzureCredential / WorkloadIdentityCredential.
+  AZURE_CLIENT_ID: 00000000-0000-0000-0000-000000000004
+  AZURE_TENANT_ID: 00000000-0000-0000-0000-000000000003
+  AZURE_FEDERATED_TOKEN_FILE: /var/run/secrets/azure/tokens/azure-identity-token
+  # --- AgentCore (AWS bridge) ---------------------------------------------
+  # Values come from `terraform -chdir=../../infra/terraform-aws output -json
+  # k8s_configmap_env`. Update both files together when re-applying.
+  GATEWAY_AWS_REGION: us-east-1
+  GATEWAY_AWS_ROLE_ARN: arn:aws:iam::123456789012:role/multicloud-ai-agent-gateway-agentcore-invoker
+  GATEWAY_AWS_BRIDGE_TENANT_ID: 00000000-0000-0000-0000-000000000001
+  GATEWAY_AWS_BRIDGE_CLIENT_ID: 00000000-0000-0000-0000-000000000002
+  GATEWAY_AWS_BRIDGE_SCOPE: api://multicloud-ai-agent-gateway-aws-bridge/.default
+  GATEWAY_AWS_BRIDGE_TOKEN_FILE: /var/run/secrets/azure/tokens/azure-identity-token
+  # --- Google Cloud direct agents -----------------------------------------
+  # Values come from `terraform -chdir=../../infra/terraform-gcp output -json
+  # k8s_configmap_env`. Cloud Billing export itself still must be enabled on
+  # the billing account and pointed to my-gcp-project.billing_export.
+  GATEWAY_GCP_PROJECT_ID: my-gcp-project
+  GATEWAY_GCP_REGION: europe-west1
+  GATEWAY_GCP_BILLING_DATASET: billing_export
+  GATEWAY_GCP_BIGQUERY_LOCATION: EU
+  GATEWAY_GCP_RUNTIME_SERVICE_ACCOUNT: agent-gateway-runtime@my-gcp-project.iam.gserviceaccount.com
+  GATEWAY_GCP_WORKLOAD_PROVIDER: projects/987654321098/locations/global/workloadIdentityPools/aks-agent-gateway/providers/aks-oidc
