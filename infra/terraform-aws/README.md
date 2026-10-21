@@ -49,6 +49,17 @@ Temporary AWS credentials (15 min – 12 h)
 Amazon Bedrock AgentCore Runtime
 ```
 
+## Local development without AKS
+
+Set `create_local_dev_secret = true` (and leave `aks_oidc_issuer_url` empty if
+there is no cluster yet). The module then adds a client secret to the App
+Registration and prints `local_dev_env`: the same `GATEWAY_AWS_*` variables
+plus `GATEWAY_AWS_BRIDGE_CLIENT_SECRET`. With that variable set the gateway
+uses `ClientSecretCredential` instead of the projected ServiceAccount token,
+and the rest of the chain (Entra token, `sts:AssumeRoleWithWebIdentity`,
+AgentCore / Cost Explorer) is identical to the pod. This is how
+`pytest -m live_aws` runs from a laptop. Do not ship the secret to a cluster.
+
 ## Prerequisites
 
 1. **AKS cluster has OIDC issuer enabled.** AKS-managed clusters created in

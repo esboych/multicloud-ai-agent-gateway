@@ -41,6 +41,8 @@ resource "azuread_service_principal" "gateway" {
 }
 
 resource "azuread_application_federated_identity_credential" "gateway_aks" {
+  count = var.aks_oidc_issuer_url == "" ? 0 : 1
+
   application_id = azuread_application.gateway.id
   display_name   = "aks-${var.k8s_namespace}-${var.k8s_service_account}"
   description    = "Trust AKS ServiceAccount tokens for the multicloud-ai-agent-gateway pod."
@@ -53,4 +55,15 @@ resource "azuread_application_federated_identity_credential" "gateway_aks" {
 
   # Subject the AAD federated credential expects in the K8s SA token's `sub`.
   subject = local.k8s_subject
+}
+
+# Optional, development only: a client secret so the gateway can run outside
+# AKS (laptop, CI) and still exercise the real Entra -> STS exchange. The
+# production path stays the federated credential above.
+resource "azuread_application_password" "local_dev" {
+  count = var.create_local_dev_secret ? 1 : 0
+
+  application_id    = azuread_application.gateway.id
+  display_name      = "local-dev"
+  end_date_relative = var.local_dev_secret_lifetime
 }

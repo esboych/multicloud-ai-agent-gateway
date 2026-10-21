@@ -146,6 +146,14 @@ class Settings(BaseSettings):
         default="/var/run/secrets/azure/tokens/azure-identity-token",
         description="Projected K8s ServiceAccount token file used by WorkloadIdentityCredential.",
     )
+    aws_bridge_client_secret: str = Field(
+        default="",
+        description=(
+            "Development only. When set, the Entra token for the AWS bridge is obtained "
+            "with ClientSecretCredential instead of the projected ServiceAccount token, so "
+            "the gateway can run outside AKS (laptop, CI) against real AWS."
+        ),
+    )
     aws_bridge_session_name: str = Field(default="multicloud-ai-agent-gateway")
     aws_bridge_refresh_margin_seconds: int = Field(default=60, ge=0)
     aws_bridge_propagate_user_id: bool = Field(default=False)

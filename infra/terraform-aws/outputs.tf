@@ -57,3 +57,21 @@ output "k8s_configmap_env" {
     GATEWAY_AWS_BRIDGE_TOKEN_FILE = "/var/run/secrets/azure/tokens/azure-identity-token"
   }
 }
+
+output "local_dev_env" {
+  description = <<-EOT
+    Environment for a gateway running outside AKS with the local dev secret
+    (create_local_dev_secret = true). Same variables as k8s_configmap_env plus
+    GATEWAY_AWS_BRIDGE_CLIENT_SECRET; the token file is not used. Export with:
+      eval "$(terraform output -json local_dev_env | jq -r 'to_entries[] | "export \(.key)=\(.value|@sh)"')"
+  EOT
+  sensitive   = true
+  value = var.create_local_dev_secret ? {
+    GATEWAY_AWS_REGION               = var.aws_region
+    GATEWAY_AWS_ROLE_ARN             = aws_iam_role.gateway.arn
+    GATEWAY_AWS_BRIDGE_TENANT_ID     = data.azuread_client_config.current.tenant_id
+    GATEWAY_AWS_BRIDGE_CLIENT_ID     = azuread_application.gateway.client_id
+    GATEWAY_AWS_BRIDGE_SCOPE         = "api://${var.aad_application_display_name}/.default"
+    GATEWAY_AWS_BRIDGE_CLIENT_SECRET = azuread_application_password.local_dev[0].value
+  } : {}
+}

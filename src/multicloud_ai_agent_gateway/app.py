@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 from fastapi import FastAPI
 
@@ -192,29 +192,30 @@ def _try_build_llm_router(settings: Settings, specs: list[AgentSpec]) -> LLMRout
 def _build_aad_token_provider(settings: Settings):
     """Workload-identity-backed bearer-token provider for Azure Cognitive Services."""
     if settings.azure_workload_identity_configured():
-        tenant_id = settings.azure_tenant_id
-        client_id = settings.azure_client_id
-        token_file_path = settings.azure_federated_token_file
+        credential_kwargs: dict[str, Any] = {
+            "tenant_id": settings.azure_tenant_id,
+            "client_id": settings.azure_client_id,
+            "token_file_path": settings.azure_federated_token_file,
+        }
     elif settings.aws_bridge_tenant_id and settings.aws_bridge_client_id:
         # Fallback for local / older deployments where only the bridge App
         # Registration is configured. The AKS deployment uses AZURE_* so the
         # LLM router authenticates as the same UAMI that already has Foundry /
         # Azure OpenAI data-plane roles.
-        tenant_id = settings.aws_bridge_tenant_id
-        client_id = settings.aws_bridge_client_id
-        token_file_path = settings.aws_bridge_token_file
+        credential_kwargs = {
+            "tenant_id": settings.aws_bridge_tenant_id,
+            "client_id": settings.aws_bridge_client_id,
+            "token_file_path": settings.aws_bridge_token_file,
+            "client_secret": settings.aws_bridge_client_secret,
+        }
     else:
         return None
     try:
-        from azure.identity import WorkloadIdentityCredential, get_bearer_token_provider
+        from azure.identity import get_bearer_token_provider
     except ImportError:  # pragma: no cover
         return None
     try:
-        credential = WorkloadIdentityCredential(
-            tenant_id=tenant_id,
-            client_id=client_id,
-            token_file_path=token_file_path,
-        )
+        credential = _entra_credential(**credential_kwargs)
         return get_bearer_token_provider(
             credential, "https://cognitiveservices.azure.com/.default"
         )
@@ -223,15 +224,36 @@ def _build_aad_token_provider(settings: Settings):
         return None
 
 
-def _build_aws_bridge(settings: Settings):
+def _entra_credential(
+    *, tenant_id: str, client_id: str, token_file_path: str, client_secret: str = ""
+) -> Any:
+    """Workload identity (projected SA token) in the cluster; client secret for
+    local development when GATEWAY_AWS_BRIDGE_CLIENT_SECRET is set."""
+    if client_secret:
+        from azure.identity import ClientSecretCredential
+
+        log.warning(
+            "Entra credential for client %s uses a client secret (development mode).",
+            client_id,
+        )
+        return ClientSecretCredential(
+            tenant_id=tenant_id, client_id=client_id, client_secret=client_secret
+        )
     from azure.identity import WorkloadIdentityCredential
 
+    return WorkloadIdentityCredential(
+        tenant_id=tenant_id, client_id=client_id, token_file_path=token_file_path
+    )
+
+
+def _build_aws_bridge(settings: Settings):
     from multicloud_ai_agent_gateway.auth.aws_bridge import AwsBridgeCredentials
 
-    credential = WorkloadIdentityCredential(
+    credential = _entra_credential(
         tenant_id=settings.aws_bridge_tenant_id,
         client_id=settings.aws_bridge_client_id,
         token_file_path=settings.aws_bridge_token_file,
+        client_secret=settings.aws_bridge_client_secret,
     )
     return AwsBridgeCredentials(
         aad_credential=credential,

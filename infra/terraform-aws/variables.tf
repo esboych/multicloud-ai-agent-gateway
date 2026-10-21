@@ -6,9 +6,12 @@ variable "aws_region" {
 
 variable "aks_oidc_issuer_url" {
   type        = string
+  default     = ""
   description = <<-EOT
-    AKS cluster OIDC issuer URL. Required so the App Registration trusts tokens
-    issued for the gateway pod's Kubernetes ServiceAccount.
+    AKS cluster OIDC issuer URL, so the App Registration trusts tokens issued
+    for the gateway pod's Kubernetes ServiceAccount. Leave empty when there is
+    no cluster yet (local development with create_local_dev_secret = true);
+    the federated credential is then not created.
 
     Look it up with:
       az aks show -g <rg> -n <cluster> --query oidcIssuerProfile.issuerURL -o tsv
@@ -103,4 +106,22 @@ variable "tags" {
   type        = map(string)
   description = "Tags applied to AWS resources."
   default     = {}
+}
+
+variable "create_local_dev_secret" {
+  type        = bool
+  description = <<-EOT
+    Create a client secret on the App Registration so a gateway running
+    outside AKS (a laptop, CI) can obtain the same Entra token with
+    ClientSecretCredential (GATEWAY_AWS_BRIDGE_CLIENT_SECRET) instead of a
+    projected ServiceAccount token. Development and integration tests only:
+    a long-lived secret is exactly what the workload-identity design avoids.
+  EOT
+  default     = false
+}
+
+variable "local_dev_secret_lifetime" {
+  type        = string
+  description = "Lifetime of the local dev secret as a Terraform duration, e.g. 720h."
+  default     = "720h"
 }

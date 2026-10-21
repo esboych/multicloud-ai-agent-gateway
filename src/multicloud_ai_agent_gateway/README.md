@@ -185,6 +185,7 @@ AgentCore (AWS) side — required only when at least one entry in `GATEWAY_AGENT
 | `GATEWAY_AWS_BRIDGE_CLIENT_ID` | Yes | `""` | Entra App Registration client ID (also the AAD token `aud`). |
 | `GATEWAY_AWS_BRIDGE_SCOPE` | Yes | `""` | Token scope to request. Must match the App Registration identifier URI, i.e. `api://<aad_application_display_name>/.default` as printed by `terraform output -json k8s_configmap_env` (not `api://<client-id>/.default`). |
 | `GATEWAY_AWS_BRIDGE_TOKEN_FILE` | No | `/var/run/secrets/azure/tokens/azure-identity-token` | Path to projected K8s SA token used by `WorkloadIdentityCredential`. |
+| `GATEWAY_AWS_BRIDGE_CLIENT_SECRET` | No | `""` | Development only: use `ClientSecretCredential` instead of the projected token so the gateway can run outside AKS (see `infra/terraform-aws/README.md`, local development). |
 | `GATEWAY_AWS_BRIDGE_SESSION_NAME` | No | `multicloud-ai-agent-gateway` | `RoleSessionName` reported in CloudTrail. |
 | `GATEWAY_AWS_BRIDGE_REFRESH_MARGIN_SECONDS` | No | `60` | How early to refresh STS creds before `Expiration`. |
 | `GATEWAY_AWS_BRIDGE_PROPAGATE_USER_ID` | No | `false` | Reserved for future use; gateway today does not yet propagate end-user IDs. |

@@ -61,3 +61,18 @@ replaced by the null store and an empty recorder was skipped, so nothing was
 ever remembered or replayed, with no error anywhere. Every optional
 collaborator is now tested with `is not None`, and the regression tests
 assert on the recorded state rather than on the absence of exceptions.
+
+## 7. Bring the AWS side up without a cluster
+
+The bridge can be proven from a laptop before any pod exists:
+`create_local_dev_secret = true` in `infra/terraform-aws/` adds a client
+secret to the App Registration, the gateway picks it up through
+`GATEWAY_AWS_BRIDGE_CLIENT_SECRET`, and everything after the Entra token
+(`sts:AssumeRoleWithWebIdentity`, Cost Explorer, AgentCore) is the
+production path. Apply with `restrict_to_service_principal_subject = false`
+first, let `pytest -m live_aws` print and compare the token's `sub`, then
+flip it to `true` and apply again; the test suite re-runs green against
+the pinned trust policy. A Bedrock model whose daily token quota is spent
+answers HTTP 200 with a `ThrottlingException` body; the live suite reports
+that as a skip, and the same condition is what triggers the AutoRouter
+runner-up retry in `/v1/chat`.

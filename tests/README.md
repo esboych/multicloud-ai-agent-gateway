@@ -9,13 +9,15 @@ pytest -q -m integration      # black-box: real gateway processes over HTTP
 pytest -q -s -m load          # 10 concurrent users against those processes
 ```
 
-Three layers, all offline (no Foundry, AAD, AWS, GCP or public JWKS):
+Three offline layers (no Foundry, AAD, AWS, GCP or public JWKS) plus one opt-in live layer:
 
 | Layer | What runs | Where |
 |---|---|---|
 | unit / in-process | pure functions and FastAPI `TestClient` against the real app, backends faked | `tests/test_*.py` |
 | integration | `python -m multicloud_ai_agent_gateway` started as a subprocess on a free port, sqlite conversation store, real HTTP / SSE; a second process with `GATEWAY_AUTH_MODE=jwt` validates tokens against a local OIDC issuer (discovery document + JWKS served over HTTP), so the production `JwksKeyResolver` path is exercised | `tests/integration/test_live_gateway.py` |
 | load | `scripts/loadtest.py` driven by pytest: 10 users × 30 requests, mixed `invoke` / `chat` (sticky continuation) / `stream` / `mcp` / `a2a`; once against the instant demo agent, once against a 100 ms-slow agent to prove requests overlap instead of serialising | `tests/integration/test_load.py` |
+
+| live AWS (opt-in, costs money) | `pytest -m live_aws`: the real Microsoft Entra → `sts:AssumeRoleWithWebIdentity` exchange with the App Registration from `infra/terraform-aws` (client-secret development mode), token claims vs. the IAM trust policy, Cost Explorer through the bridge, an AgentCore runtime over REST / SSE / MCP / A2A with a real `runtimeSessionId` and sticky AutoRouter, the AutoRouter runner-up retry when an LLM runtime reports a quota error inside a 200, and an AccessDenied for a runtime outside the IAM policy. Needs `local_dev_env` from the module exported plus `GATEWAY_LIVE_AGENTCORE_*_RUNTIME_ARN`; skips itself without them. | `tests/integration/test_live_aws.py` |
 
 `GATEWAY_INTEGRATION_URL=http://host:port pytest -m integration` runs the
 anonymous black-box tests against an already running gateway (for example

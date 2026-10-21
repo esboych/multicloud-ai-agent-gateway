@@ -203,6 +203,7 @@ front, before consumers outside that boundary can reach it.
 pytest -q                 # unit + in-process API tests, all offline (~340)
 pytest -q -m integration  # real gateway processes over HTTP, incl. JWT against a local JWKS issuer
 pytest -q -s -m load      # 10 concurrent users over REST / SSE / MCP / A2A
+pytest -q -m live_aws     # opt-in: real Entra -> STS bridge, Cost Explorer, AgentCore (infra/terraform-aws)
 python scripts/loadtest.py --url http://localhost:8080 --users 25 --requests 40
 ruff check src tests examples scripts
 ```

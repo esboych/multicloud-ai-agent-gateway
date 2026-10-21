@@ -153,3 +153,25 @@ def test_rejects_bad_auth_config(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_rejects_unknown_conversation_store(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(ValueError):
         _make_settings({"GATEWAY_CONVERSATION_STORE": "redis"}, monkeypatch)
+
+
+def test_aws_bridge_uses_client_secret_credential_when_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    from multicloud_ai_agent_gateway.app import _build_aws_bridge
+
+    settings = _make_settings(
+        {
+            "GATEWAY_AWS_REGION": "us-east-1",
+            "GATEWAY_AWS_ROLE_ARN": "arn:aws:iam::123456789012:role/x",
+            "GATEWAY_AWS_BRIDGE_TENANT_ID": "tenant",
+            "GATEWAY_AWS_BRIDGE_CLIENT_ID": "client",
+            "GATEWAY_AWS_BRIDGE_SCOPE": "api://x/.default",
+            "GATEWAY_AWS_BRIDGE_CLIENT_SECRET": "dev-secret",
+        },
+        monkeypatch,
+    )
+    bridge = _build_aws_bridge(settings)
+    assert type(bridge._aad_credential).__name__ == "ClientSecretCredential"
+
+    monkeypatch.delenv("GATEWAY_AWS_BRIDGE_CLIENT_SECRET")
+    bridge = _build_aws_bridge(Settings())
+    assert type(bridge._aad_credential).__name__ == "WorkloadIdentityCredential"
