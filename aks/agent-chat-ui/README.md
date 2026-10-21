@@ -73,6 +73,7 @@ sets `X-Forwarded-For`, so login rate limiting keys on the real client).
 |---|---|
 | `GATEWAY_URL` | Where to send `/v1/agents/<name>:invoke` requests. |
 | `REQUEST_TIMEOUT_SECONDS` | Per-request timeout for the call to the gateway. |
+| `GATEWAY_BEARER_TOKEN_FILE` / `GATEWAY_BEARER_TOKEN` | Bearer token sent to the gateway when it runs with `GATEWAY_AUTH_MODE=jwt`. Point the file at a projected ServiceAccount token (`audience: multicloud-ai-agent-gateway`); it is re-read per request. |
 | `AUTH_COOKIE_SECURE` | Mark the session cookie `Secure`. Set `true` behind a TLS ingress. |
 | `TRUST_PROXY_HEADERS` | Use `X-Forwarded-For` as the login rate-limit key. Only behind a proxy that overwrites the header; default `false`. |
 | `HEALTH_PORT` | Bind port. |

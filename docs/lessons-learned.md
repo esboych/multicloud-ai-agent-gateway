@@ -51,3 +51,13 @@ HTTP 200 with an error payload. The gateway detects the shape
 (`AgentReturnedError`) and, when configured, retries through the classic
 zero-LLM `direct` agent so the caller gets an answer instead of a stack
 trace. The chat-ui shows this as a `routing-retry` event.
+
+## 6. A class with `__len__` is falsy when empty
+
+Both the conversation store and the Foundry tool-result recorder define
+`__len__` for diagnostics. Written as `conversations or NullStore()` and
+`recorder.recording() if recorder else dispatcher`, an *empty* store was
+replaced by the null store and an empty recorder was skipped, so nothing was
+ever remembered or replayed, with no error anywhere. Every optional
+collaborator is now tested with `is not None`, and the regression tests
+assert on the recorded state rather than on the absence of exceptions.

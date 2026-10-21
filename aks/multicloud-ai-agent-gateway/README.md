@@ -97,6 +97,9 @@ kubectl -n agent-gateway port-forward svc/multicloud-ai-agent-gateway 18080:80
 
 curl http://127.0.0.1:18080/healthz
 curl http://127.0.0.1:18080/v1/agents
+curl http://127.0.0.1:18080/.well-known/agent-card.json      # A2A discovery
+curl -X POST http://127.0.0.1:18080/mcp -H 'Content-Type: application/json' \
+     -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'     # MCP tools
 curl -X POST http://127.0.0.1:18080/v1/agents/AzureFinOpsAgent:invoke \
      -H 'Content-Type: application/json' \
      -d '{"prompt":"Show current month-to-date Azure costs and top drivers."}'
@@ -113,6 +116,9 @@ populated and, if the agent used a tool, one entry in `tool_events`.
 | `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_FEDERATED_TOKEN_FILE` | pod workload identity (Foundry, Azure OpenAI). Set explicitly because not every AKS cluster runs the Workload Identity webhook, see `docs/lessons-learned.md`. |
 | `GATEWAY_AWS_*` | Entra → AWS STS bridge, from `infra/terraform-aws/` output |
 | `GATEWAY_GCP_*` | GCP direct agents, from `infra/terraform-gcp/` output |
+| `GATEWAY_AUTH_*`, `GATEWAY_TENANT_POLICY_JSON` | caller authentication (bearer JWT from Entra or the cluster's own OIDC issuer) and per-tenant agent allow-list; off by default, see `docs/multitenancy.md` |
+| `GATEWAY_CONVERSATION_*` | conversation store (`memory` per replica, `sqlite` on a volume) |
+| `GATEWAY_MCP_ENABLED`, `GATEWAY_A2A_ENABLED`, `GATEWAY_PUBLIC_URL` | MCP and A2A facades; the public URL is advertised in the A2A agent card |
 
 Anything your own Foundry tool dispatcher reads from the environment goes
 in the same ConfigMap.

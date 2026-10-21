@@ -79,6 +79,34 @@ data:
         ]
       }
     ]
+  # --- Caller authentication and tenant policy (optional) -----------------
+  # Off by default: the gateway trusts the ClusterIP + NetworkPolicy boundary.
+  # Switch to jwt before anything outside that boundary can reach it. The
+  # second issuer accepts projected ServiceAccount tokens from this cluster
+  # (audience = multicloud-ai-agent-gateway), tenant = caller namespace.
+  GATEWAY_AUTH_MODE: none
+  # GATEWAY_AUTH_ISSUERS_JSON: |
+  #   [
+  #     {"issuer": "https://login.microsoftonline.com/00000000-0000-0000-0000-000000000003/v2.0",
+  #      "audience": "api://multicloud-ai-agent-gateway", "tenant_claim": "tid", "label": "entra"},
+  #     {"issuer": "https://eastus2.oic.prod-aks.azure.com/00000000-0000-0000-0000-000000000003/00000000-0000-0000-0000-00000000000c",
+  #      "audience": ["multicloud-ai-agent-gateway"], "tenant_claim": "kubernetes.io/namespace", "label": "in-cluster"}
+  #   ]
+  # GATEWAY_TENANT_POLICY_JSON: |
+  #   {"agent-chat-ui": {"agents": ["*"]}, "finops-team": {"agents": ["AzureFinOpsAgent", "GcpAgent"]}, "*": {"agents": []}}
+  # --- Conversation store ---------------------------------------------------
+  # memory is per replica; sqlite needs a volume mounted at the path below.
+  GATEWAY_CONVERSATION_STORE: memory
+  # GATEWAY_CONVERSATION_STORE_PATH: /var/lib/gateway/conversations.db
+  GATEWAY_CONVERSATION_TTL_SECONDS: "86400"
+  # --- Protocol facades -----------------------------------------------------
+  GATEWAY_MCP_ENABLED: "true"
+  GATEWAY_A2A_ENABLED: "true"
+  # Advertised in the A2A agent card; must be reachable by A2A clients.
+  GATEWAY_PUBLIC_URL: http://multicloud-ai-agent-gateway.agent-gateway.svc.cluster.local
+  # --- Foundry fallback behaviour -------------------------------------------
+  GATEWAY_FOUNDRY_FALLBACK_REPLAY_TOOL_RESULTS: "true"
+  GATEWAY_FOUNDRY_STREAM_FALLBACK_HOLDBACK_CHARS: "0"
   # --- Pod workload identity (Azure) ------------------------------------
   # AZURE_CLIENT_ID / AZURE_TENANT_ID / AZURE_FEDERATED_TOKEN_FILE are set
   # explicitly here because not every AKS cluster runs the Azure Workload
