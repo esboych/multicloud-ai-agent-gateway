@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "multicloud-ai-agent-gateway"
-version = "0.1.0"
+version = "0.2.0"
 description = "One internal API in front of AI agents hosted on Microsoft Foundry, AWS Bedrock AgentCore and Google Cloud, with workload-identity auth to all three."
 readme = "README.md"
 license = "Apache-2.0"
@@ -35,6 +35,9 @@ dependencies = [
   "google-auth>=2.30",
   "google-cloud-bigquery>=3.25",
   "google-cloud-asset>=3.26",
+  # Bearer-token authentication (GATEWAY_AUTH_MODE=jwt): JWKS fetch and
+  # RS256/ES256 verification. Already a transitive dependency via msal.
+  "PyJWT[crypto]>=2.8",
   # Optional LLM tie-breaker for the hybrid router. The class is import-lazy
   # in core/llm_router.py so the package still works if openai is missing,
   # but having it in main deps keeps the container image self-contained.

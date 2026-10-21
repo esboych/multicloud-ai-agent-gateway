@@ -33,6 +33,13 @@ class Settings:
     # Honour X-Forwarded-For for login rate limiting. Off by default: the
     # header is client-controlled unless a proxy in front overwrites it.
     trust_proxy_headers: bool = False
+    # Bearer token presented to the gateway when it runs with
+    # GATEWAY_AUTH_MODE=jwt. A file path is preferred in Kubernetes: point it
+    # at a projected ServiceAccount token (audience = the gateway) and the
+    # UI authenticates as its own namespace; the file is re-read per request
+    # because projected tokens rotate.
+    gateway_bearer_token: str = ""
+    gateway_bearer_token_file: str = ""
 
 
 @dataclass(frozen=True)
@@ -134,7 +141,24 @@ def load_settings(env: dict[str, str]) -> Settings:
         request_timeout_seconds=_int_value(timeout_value, "REQUEST_TIMEOUT_SECONDS", 900, min_value=1),
         health_port=_int_env(env, "HEALTH_PORT", 8080, min_value=1),
         trust_proxy_headers=_bool_env(env.get("TRUST_PROXY_HEADERS"), default=False),
+        gateway_bearer_token=(env.get("GATEWAY_BEARER_TOKEN") or "").strip(),
+        gateway_bearer_token_file=(env.get("GATEWAY_BEARER_TOKEN_FILE") or "").strip(),
     )
+
+
+def gateway_headers(settings: Settings, *, accept: str = "application/json") -> dict[str, str]:
+    """Headers for every call to the gateway, including the bearer token if any."""
+    headers = {"Content-Type": "application/json", "Accept": accept}
+    token = settings.gateway_bearer_token
+    if settings.gateway_bearer_token_file:
+        try:
+            with open(settings.gateway_bearer_token_file, "r", encoding="utf-8") as handle:
+                token = handle.read().strip() or token
+        except OSError as exc:
+            log_event("gateway_token_file_unreadable", path=settings.gateway_bearer_token_file, error=str(exc))
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
 
 
 def load_auth_settings(env: dict[str, str]) -> AuthSettings:
@@ -241,7 +265,7 @@ def invoke_agent_via_gateway(settings: Settings, agent_name: str, prompt: str) -
         url,
         data=body,
         method="POST",
-        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        headers=gateway_headers(settings),
     )
     try:
         with urllib.request.urlopen(request, timeout=settings.request_timeout_seconds) as response:
@@ -279,7 +303,7 @@ def route_via_gateway(settings: Settings, prompt: str) -> dict[str, Any]:
         url,
         data=body,
         method="POST",
-        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        headers=gateway_headers(settings),
     )
     try:
         with urllib.request.urlopen(request, timeout=settings.request_timeout_seconds) as response:
@@ -532,7 +556,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             url,
             data=body,
             method="POST",
-            headers={"Content-Type": "application/json", "Accept": "text/event-stream"},
+            headers=gateway_headers(_SETTINGS, accept="text/event-stream"),
         )
 
         try:

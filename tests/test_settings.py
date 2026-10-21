@@ -101,3 +101,55 @@ def test_non_array_json_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = _make_settings({"GATEWAY_AGENTS_JSON": '{"name":"x"}'}, monkeypatch)
     with pytest.raises(ValueError, match="JSON array"):
         settings.parsed_agents()
+
+
+def test_auth_and_store_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _make_settings({}, monkeypatch)
+    assert settings.auth_mode == "none"
+    assert settings.parsed_auth_issuers() == []
+    assert settings.conversation_store == "memory"
+    assert settings.mcp_enabled and settings.a2a_enabled
+    assert settings.foundry_fallback_replay_tool_results is True
+    assert settings.foundry_stream_fallback_holdback_chars == 0
+
+
+def test_parses_auth_issuers(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = json.dumps(
+        [
+            {"issuer": "https://login.microsoftonline.com/t/v2.0", "audience": "api://gw"},
+            {
+                "issuer": "https://oidc.example/aks",
+                "audience": ["gw", "gw2"],
+                "tenant_claim": "kubernetes.io/namespace",
+                "algorithms": ["RS256", "ES256"],
+            },
+        ]
+    )
+    settings = _make_settings(
+        {"GATEWAY_AUTH_MODE": "JWT", "GATEWAY_AUTH_ISSUERS_JSON": payload}, monkeypatch
+    )
+    assert settings.auth_mode == "jwt"
+    entra, aks = settings.parsed_auth_issuers()
+    assert entra.audiences() == ("api://gw",)
+    assert aks.audiences() == ("gw", "gw2")
+    assert aks.tenant_claim == "kubernetes.io/namespace"
+    assert aks.algorithms == ["RS256", "ES256"]
+
+
+def test_rejects_bad_auth_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(ValueError):
+        _make_settings({"GATEWAY_AUTH_MODE": "basic"}, monkeypatch)
+    monkeypatch.delenv("GATEWAY_AUTH_MODE")
+    settings = _make_settings({"GATEWAY_AUTH_ISSUERS_JSON": "{oops"}, monkeypatch)
+    with pytest.raises(ValueError):
+        settings.parsed_auth_issuers()
+    settings = _make_settings(
+        {"GATEWAY_AUTH_ISSUERS_JSON": '[{"issuer": "https://x", "audience": ""}]'}, monkeypatch
+    )
+    with pytest.raises(ValueError):
+        settings.parsed_auth_issuers()
+
+
+def test_rejects_unknown_conversation_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(ValueError):
+        _make_settings({"GATEWAY_CONVERSATION_STORE": "redis"}, monkeypatch)

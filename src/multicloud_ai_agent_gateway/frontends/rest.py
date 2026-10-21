@@ -5,22 +5,29 @@ import json
 import logging
 from typing import Any
 
-from fastapi import APIRouter, FastAPI, HTTPException, Path
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Path
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from multicloud_ai_agent_gateway.auth.principal import Principal
 from multicloud_ai_agent_gateway.core import (
     AUTO_ROUTER_BACKEND_ID,
     AUTO_ROUTER_DESCRIPTION,
     AUTO_ROUTER_NAME,
-    AgentReturnedError,
-    AutoRouterNotConfigured,
-    NoDispatcherConfigured,
+    GatewayError,
     RouteDecision,
     Router,
-    ToolBudgetExceeded,
-    UnknownAgent,
-    event_kind,
+)
+from multicloud_ai_agent_gateway.core.conversations import InMemoryConversationStore
+from multicloud_ai_agent_gateway.core.service import (
+    GatewayService,
+    ServiceEvent,
+    service_event_kind,
+)
+from multicloud_ai_agent_gateway.frontends.common import (
+    Authenticator,
+    bearer_principal_dependency,
+    http_error_for,
 )
 
 log = logging.getLogger(__name__)
@@ -51,10 +58,9 @@ class RoutingMetadata(BaseModel):
     mode: str = "auto"
     reason: str = ""
     scores: dict[str, float] = Field(default_factory=dict)
-    # Phase 1 additions: surface which classifier produced the decision and
-    # how confident it was, plus the top-N short list. The UI uses these to
-    # render a "via bm25 · 0.42 conf" badge and an offer to rerun against
-    # a runner-up agent.
+    # Which classifier produced the decision and how confident it was, plus
+    # the top-N short list. ``method`` can also be ``sticky`` (conversation
+    # store resolved the agent) or carry ``+retry`` / ``+policy`` suffixes.
     method: str = "keyword"
     confidence: float = 0.0
     candidates: list[dict[str, Any]] = Field(default_factory=list)
@@ -69,6 +75,9 @@ class ToolEventResponse(BaseModel):
     arguments: dict[str, Any]
     result: dict[str, Any] | None = None
     error: str | None = None
+    # True when the result was replayed from the primary attempt during a
+    # Foundry model fallback instead of executing the tool again.
+    replayed: bool = False
 
 
 class InvokeResponse(BaseModel):
@@ -96,19 +105,58 @@ class HealthResponse(BaseModel):
     status: str
     backends: list[str]
     auto_router_enabled: bool = False
+    auth_enabled: bool = False
 
 
-def build_rest_app(*, router: Router, gateway_version: str) -> FastAPI:
+class PrincipalResponse(BaseModel):
+    subject: str
+    tenant: str | None = None
+    issuer: str | None = None
+    scopes: list[str] = Field(default_factory=list)
+    anonymous: bool = False
+    allowed_agents: list[str] = Field(default_factory=list)
+
+
+class ConversationResponse(BaseModel):
+    conversation_id: str
+    agent: str
+    owner_subject: str | None = None
+    owner_tenant: str | None = None
+    created_at: float
+    last_seen_at: float
+
+
+def build_rest_app(
+    *,
+    gateway_version: str,
+    router: Router | None = None,
+    service: GatewayService | None = None,
+    authenticator: Authenticator | None = None,
+) -> FastAPI:
+    """Build the FastAPI app.
+
+    Pass ``service`` (what ``app.py`` does) or, for tests and embedding, a
+    bare ``router``: it is wrapped in a ``GatewayService`` with an in-memory
+    conversation store and no tenant policy.
+    """
+    if service is None:
+        if router is None:
+            raise ValueError("build_rest_app needs a service or a router")
+        service = GatewayService(router, conversations=InMemoryConversationStore())
+    svc = service
+
     app = FastAPI(
         title="Multicloud AI Agent Gateway",
         version=gateway_version,
         description="Internal cross-cloud agent invocation API.",
     )
     api = APIRouter(prefix="/v1")
+    principal_dep = bearer_principal_dependency(authenticator)
+    auth_enabled = authenticator is not None
 
-    def _agent_listing() -> list[AgentDescriptor]:
-        items = [AgentDescriptor(**spec.to_dict()) for spec in router.registry.list()]
-        if router.auto_router_enabled:
+    def _agent_listing(principal: Principal) -> list[AgentDescriptor]:
+        items = [AgentDescriptor(**spec.to_dict()) for spec in svc.list_agents(principal)]
+        if svc.auto_router_available(principal):
             items.append(
                 AgentDescriptor(
                     name=AUTO_ROUTER_NAME,
@@ -120,8 +168,8 @@ def build_rest_app(*, router: Router, gateway_version: str) -> FastAPI:
         return items
 
     def _backends_list() -> list[str]:
-        backends = {spec.backend_id for spec in router.registry.list()}
-        if router.auto_router_enabled:
+        backends = {spec.backend_id for spec in svc.router.registry.list()}
+        if svc.auto_router_enabled:
             backends.add(AUTO_ROUTER_BACKEND_ID)
         return sorted(backends)
 
@@ -130,7 +178,8 @@ def build_rest_app(*, router: Router, gateway_version: str) -> FastAPI:
         return HealthResponse(
             status="ok",
             backends=_backends_list(),
-            auto_router_enabled=router.auto_router_enabled,
+            auto_router_enabled=svc.auto_router_enabled,
+            auth_enabled=auth_enabled,
         )
 
     @app.get("/readyz", response_model=HealthResponse, tags=["health"])
@@ -138,26 +187,56 @@ def build_rest_app(*, router: Router, gateway_version: str) -> FastAPI:
         return HealthResponse(
             status="ready",
             backends=_backends_list(),
-            auto_router_enabled=router.auto_router_enabled,
+            auto_router_enabled=svc.auto_router_enabled,
+            auth_enabled=auth_enabled,
         )
 
     @api.get("/agents", response_model=AgentListResponse, tags=["agents"])
-    async def list_agents() -> AgentListResponse:
-        return AgentListResponse(agents=_agent_listing())
+    async def list_agents(principal: Principal = Depends(principal_dep)) -> AgentListResponse:
+        return AgentListResponse(agents=_agent_listing(principal))
+
+    @api.get("/me", response_model=PrincipalResponse, tags=["auth"])
+    async def whoami(principal: Principal = Depends(principal_dep)) -> PrincipalResponse:
+        return PrincipalResponse(
+            **principal.to_dict(),
+            allowed_agents=[spec.name for spec in svc.list_agents(principal)],
+        )
+
+    @api.get(
+        "/conversations/{conversation_id}",
+        response_model=ConversationResponse,
+        tags=["conversations"],
+    )
+    async def get_conversation(
+        conversation_id: str = Path(..., min_length=1),
+        principal: Principal = Depends(principal_dep),
+    ) -> ConversationResponse:
+        record = await svc.conversations.get(conversation_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail=f"Unknown conversation: {conversation_id!r}")
+        try:
+            svc.check_owner(principal, record)
+        except GatewayError as exc:
+            raise http_error_for(exc) from exc
+        return ConversationResponse(**record.to_dict())
 
     @api.post("/route", response_model=RouteResponse, tags=["routing"])
-    async def route_prompt(body: RouteRequest) -> RouteResponse:
+    async def route_prompt(
+        body: RouteRequest, principal: Principal = Depends(principal_dep)
+    ) -> RouteResponse:
         try:
             # Hybrid/LLM classifiers may do blocking I/O; keep the event loop
             # responsive by running the classify call on a worker thread.
-            decision = await asyncio.to_thread(router.route, body.prompt)
-        except AutoRouterNotConfigured as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+            decision = await asyncio.to_thread(svc.route, principal, body.prompt)
+        except GatewayError as exc:
+            raise http_error_for(exc) from exc
         return RouteResponse(routing=_routing_metadata(decision))
 
     @api.post("/chat", response_model=InvokeResponse, tags=["chat"])
-    async def chat(body: ChatRequest) -> InvokeResponse:
-        return await _invoke(router, AUTO_ROUTER_NAME, body.input, body.conversation_id)
+    async def chat(
+        body: ChatRequest, principal: Principal = Depends(principal_dep)
+    ) -> InvokeResponse:
+        return await _invoke(svc, principal, AUTO_ROUTER_NAME, body.input, body.conversation_id)
 
     @api.post(
         "/agents/{name}:invoke",
@@ -167,8 +246,9 @@ def build_rest_app(*, router: Router, gateway_version: str) -> FastAPI:
     async def invoke_agent(
         body: InvokeRequest,
         name: str = Path(..., min_length=1),
+        principal: Principal = Depends(principal_dep),
     ) -> InvokeResponse:
-        return await _invoke(router, name, body.prompt, body.conversation_id)
+        return await _invoke(svc, principal, name, body.prompt, body.conversation_id)
 
     @api.post(
         "/agents/{name}:continue",
@@ -178,16 +258,13 @@ def build_rest_app(*, router: Router, gateway_version: str) -> FastAPI:
     async def continue_agent(
         body: ContinueRequest,
         name: str = Path(..., min_length=1),
+        principal: Principal = Depends(principal_dep),
     ) -> InvokeResponse:
-        if Router.is_auto_router(name):
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "AutoRouter cannot be used with :continue. Pass the concrete agent "
-                    "name returned in the previous response's 'routing.selected_agent'."
-                ),
-            )
-        return await _invoke(router, name, body.prompt, body.conversation_id)
+        # AutoRouter is accepted here when the conversation store knows which
+        # agent owns the conversation (sticky routing); otherwise 400.
+        return await _invoke(
+            svc, principal, name, body.prompt, body.conversation_id, continuing=True
+        )
 
     @api.post(
         "/agents/{name}:stream",
@@ -203,24 +280,15 @@ def build_rest_app(*, router: Router, gateway_version: str) -> FastAPI:
     async def stream_agent(
         body: InvokeRequest,
         name: str = Path(..., min_length=1),
+        principal: Principal = Depends(principal_dep),
     ) -> StreamingResponse:
-        decision: RouteDecision | None = None
-        target_name = name
-
-        if Router.is_auto_router(name):
-            try:
-                decision = await asyncio.to_thread(router.route, body.prompt)
-            except AutoRouterNotConfigured as exc:
-                raise HTTPException(status_code=422, detail=str(exc)) from exc
-            target_name = decision.selected_agent
-
         try:
-            router.registry.get(target_name)
-        except UnknownAgent as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+            prepared = await svc.prepare_stream(principal, name, body.prompt, body.conversation_id)
+        except GatewayError as exc:
+            raise http_error_for(exc) from exc
 
         return StreamingResponse(
-            _sse_stream(router, target_name, body.prompt, body.conversation_id, decision),
+            _sse_stream(prepared.events()),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache, no-transform",
@@ -229,6 +297,7 @@ def build_rest_app(*, router: Router, gateway_version: str) -> FastAPI:
         )
 
     app.include_router(api)
+    app.state.gateway_service = svc
     return app
 
 
@@ -245,232 +314,49 @@ def _routing_metadata(decision: RouteDecision) -> RoutingMetadata:
     )
 
 
-async def _sse_stream(
-    router: Router,
-    name: str,
-    prompt: str,
-    conversation_id: str | None,
-    decision: RouteDecision | None,
-):
-    """Format AgentBackend events as Server-Sent Events on the wire.
+def sse_line(event: ServiceEvent) -> str:
+    """One Server-Sent Event block for a service event."""
+    kind = service_event_kind(event)
+    if kind == "routing":
+        payload = _routing_metadata(event.decision).model_dump()  # type: ignore[union-attr]
+    else:
+        payload = event.to_dict()
+    return f"event: {kind}\ndata: {json.dumps(payload, default=str)}\n\n"
 
-    When ``decision`` is provided (AutoRouter path) we prepend a ``routing``
-    event so the client learns which concrete agent received the prompt
-    before any text or tool events arrive.
 
-    Resilience: if the first agent's stream fails *before* any text chunk
-    has been emitted (e.g. Bedrock token-quota throttling), we fall back
-    to the next BM25 candidate and re-emit a ``routing-retry`` event so
-    the UI can update its bubble. Once any text has reached the wire the
-    stream is committed -- we can't rewind half a message, so we emit the
-    error and stop.
+async def _sse_stream(events):
+    """Format service events as Server-Sent Events on the wire.
+
+    Retry/fallback decisions are made inside ``GatewayService``; this layer
+    only serialises what it is handed (``routing``, ``routing-retry``,
+    ``chunk``, ``tool_started``, ``tool_finished``, ``done``, ``error``).
     """
-    if decision is not None:
-        payload = json.dumps(_routing_metadata(decision).model_dump(), default=str)
-        yield f"event: routing\ndata: {payload}\n\n"
-
-    candidates = _candidate_chain(name, decision)
-    text_emitted = False
-    last_error: tuple[str, str] | None = None
-
-    for hop, target in enumerate(candidates):
-        if hop > 0:
-            # Tell the UI we switched agents before forwarding any new events.
-            yield (
-                "event: routing-retry\n"
-                "data: "
-                + json.dumps(
-                    {
-                        "selected_agent": target,
-                        "previous_agent": candidates[hop - 1],
-                        "reason": (
-                            f"{candidates[hop - 1]} failed: "
-                            f"{last_error[0] if last_error else 'unknown'}; "
-                            f"retrying with runner-up {target}"
-                        ),
-                        "hop": hop,
-                    },
-                    default=str,
-                )
-                + "\n\n"
-            )
-
-        try:
-            async for event in router.stream(target, prompt, conversation_id=conversation_id):
-                kind = event_kind(event)
-                if kind == "chunk":
-                    text_emitted = True
-                if kind == "error":
-                    # Backend signalled error via StreamError event rather
-                    # than raising. Treat the same as an exception below:
-                    # retry from the next candidate if safe.
-                    err_data = event.to_dict()
-                    last_error = (
-                        str(err_data.get("error_type") or "AgentError"),
-                        str(err_data.get("message") or "stream error"),
-                    )
-                    if not text_emitted and hop + 1 < len(candidates):
-                        log.info(
-                            "Stream from %s emitted error before text; trying next candidate.",
-                            target,
-                        )
-                        break
-                    # Either we've already streamed chunks (cannot rewind)
-                    # or no more candidates -- forward the error as-is.
-                    yield f"event: error\ndata: {json.dumps(err_data, default=str)}\n\n"
-                    return
-                payload = json.dumps(event.to_dict(), default=str)
-                yield f"event: {kind}\ndata: {payload}\n\n"
-                if kind == "done":
-                    return
-            else:
-                # Stream ended cleanly without 'done' (rare but valid).
-                return
-            # Hit a 'break' on retryable error: continue the for-hop loop.
-            continue
-        except Exception as exc:  # noqa: BLE001 - need to catch backend errors
-            last_error = (type(exc).__name__, str(exc))
-            log.warning(
-                "Backend %s raised %s while streaming: %s",
-                target, type(exc).__name__, exc,
-            )
-            if text_emitted or hop + 1 >= len(candidates):
-                log.exception("Streaming failed for agent %s", target)
-                yield (
-                    "event: error\n"
-                    "data: "
-                    + json.dumps(
-                        {"message": str(exc), "error_type": type(exc).__name__},
-                        default=str,
-                    )
-                    + "\n\n"
-                )
-                return
-            # Otherwise fall through the for-hop and try the next candidate.
-
-    # Exhausted candidates without success.
-    if last_error is not None:
-        yield (
-            "event: error\n"
-            "data: "
-            + json.dumps(
-                {
-                    "message": f"All candidates failed; last error: {last_error[1]}",
-                    "error_type": last_error[0],
-                },
-                default=str,
-            )
-            + "\n\n"
-        )
-
-
-def _candidate_chain(initial: str, decision: RouteDecision | None) -> list[str]:
-    """Return the ordered list of agents to try: initial first, then runner-ups.
-
-    Runner-ups come from ``decision.candidates`` (BM25 top-N). Capped at 3
-    total to avoid cascading retries on broadly-failing infrastructure.
-    """
-    chain: list[str] = [initial]
-    if decision is not None:
-        for cand in decision.candidates:
-            name = cand.get("agent") if isinstance(cand, dict) else None
-            if name and name not in chain:
-                chain.append(name)
-            if len(chain) >= 3:
-                break
-    return chain
+    async for event in events:
+        yield sse_line(event)
 
 
 async def _invoke(
-    router: Router,
+    service: GatewayService,
+    principal: Principal,
     name: str,
     prompt: str,
     conversation_id: str | None,
+    *,
+    continuing: bool = False,
 ) -> InvokeResponse:
-    decision: RouteDecision | None = None
-    target_name = name
-
-    if Router.is_auto_router(name):
-        try:
-            decision = await asyncio.to_thread(router.route, prompt)
-        except AutoRouterNotConfigured as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        target_name = decision.selected_agent
-
-    candidates = _candidate_chain(target_name, decision)
-    last_error: Exception | None = None
-    used_agent = target_name
-
-    for hop, candidate in enumerate(candidates):
-        used_agent = candidate
-        try:
-            reply = await router.invoke(
-                candidate, prompt, conversation_id=conversation_id
-            )
-            break
-        except UnknownAgent as exc:
-            # Unknown agent is not retryable -- a typo / config error is
-            # the only way this happens. Fail fast.
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        except NoDispatcherConfigured as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        except ToolBudgetExceeded as exc:
-            raise HTTPException(status_code=504, detail=str(exc)) from exc
-        except AgentReturnedError as exc:
-            last_error = exc
-            log.warning(
-                "Agent %s returned error %r; %s",
-                candidate, exc.error_type,
-                f"trying runner-up {candidates[hop + 1]!r}"
-                if hop + 1 < len(candidates) else "no candidates left",
-            )
-            if hop + 1 < len(candidates):
-                continue
-            raise HTTPException(
-                status_code=502,
-                detail=f"agent_returned_error: {exc.error_type}: {exc}",
-            ) from exc
-        except Exception as exc:  # noqa: BLE001 - last-ditch error envelope
-            last_error = exc
-            log.exception("Backend invocation failed for agent %s", candidate)
-            if hop + 1 < len(candidates):
-                continue
-            raise HTTPException(
-                status_code=502,
-                detail=f"backend_error: {type(exc).__name__}",
-            ) from exc
-    else:
-        # Unreachable: the loop above either returns or raises.
-        raise HTTPException(
-            status_code=502,
-            detail=f"all_candidates_failed: {last_error!r}",
+    try:
+        outcome = await service.invoke(
+            principal, name, prompt, conversation_id, continuing=continuing
         )
+    except GatewayError as exc:
+        raise http_error_for(exc) from exc
 
-    # If we retried, surface that fact in the routing metadata by
-    # overwriting the selected_agent. The candidates list is preserved
-    # so the UI can show what was tried.
-    if decision is not None and used_agent != decision.selected_agent:
-        decision = _decision_with_retry(decision, used_agent)
-
+    reply = outcome.reply
     return InvokeResponse(
         output_text=reply.output_text,
         conversation_id=reply.conversation_id,
         finish_reason=reply.finish_reason,
         usage=reply.usage,
         tool_events=[ToolEventResponse(**event.to_dict()) for event in reply.tool_events],
-        routing=_routing_metadata(decision) if decision is not None else None,
-    )
-
-
-def _decision_with_retry(decision: RouteDecision, actual_agent: str) -> RouteDecision:
-    """Return a RouteDecision rewritten to reflect a retry-on-failure hop."""
-    from dataclasses import replace
-
-    return replace(
-        decision,
-        selected_agent=actual_agent,
-        reason=(
-            f"{decision.reason}; retried after runtime failure -> {actual_agent}"
-        ),
-        method=f"{decision.method}+retry",
+        routing=_routing_metadata(outcome.decision) if outcome.decision is not None else None,
     )

@@ -12,6 +12,9 @@ class ToolEvent:
     arguments: dict[str, Any]
     result: dict[str, Any] | None = None
     error: str | None = None
+    # True when the result came from the primary attempt's cache during a
+    # Foundry model fallback instead of a fresh execution.
+    replayed: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -19,6 +22,7 @@ class ToolEvent:
             "arguments": self.arguments,
             "result": self.result,
             "error": self.error,
+            "replayed": self.replayed,
         }
 
 
@@ -97,9 +101,15 @@ class ToolFinished:
     name: str
     result: dict[str, Any] | None = None
     error: str | None = None
+    replayed: bool = False
 
     def to_dict(self) -> dict[str, Any]:
-        return {"name": self.name, "result": self.result, "error": self.error}
+        return {
+            "name": self.name,
+            "result": self.result,
+            "error": self.error,
+            "replayed": self.replayed,
+        }
 
 
 @dataclass
@@ -228,3 +238,50 @@ class AgentReturnedError(GatewayError):
     def __init__(self, error_type: str, message: str) -> None:
         super().__init__(message)
         self.error_type = error_type
+
+
+class AuthenticationRequired(GatewayError):
+    """No usable bearer token on a request to an authenticated gateway (401)."""
+
+
+class Forbidden(GatewayError):
+    """The caller is authenticated but not allowed to do this (403)."""
+
+
+class ConversationConflict(GatewayError):
+    """A conversation id was used with an agent other than the one that owns it (409)."""
+
+    def __init__(self, conversation_id: str, owner_agent: str, requested_agent: str) -> None:
+        super().__init__(
+            f"Conversation {conversation_id!r} belongs to agent {owner_agent!r}, "
+            f"not {requested_agent!r}."
+        )
+        self.conversation_id = conversation_id
+        self.owner_agent = owner_agent
+        self.requested_agent = requested_agent
+
+
+class AutoRouterContinueUnknown(GatewayError):
+    """AutoRouter was asked to continue a conversation the store does not know (400)."""
+
+    def __init__(self, conversation_id: str) -> None:
+        super().__init__(
+            f"AutoRouter cannot continue conversation {conversation_id!r}: it is not in the "
+            "conversation store. Pass the concrete agent name returned in the previous "
+            "response's 'routing.selected_agent'."
+        )
+        self.conversation_id = conversation_id
+
+
+class BackendFailure(GatewayError):
+    """A backend raised something that is not a GatewayError (502).
+
+    Wraps the original exception so frontends can report its class name
+    without leaking the message of an arbitrary SDK error.
+    """
+
+    def __init__(self, agent: str, cause: Exception) -> None:
+        super().__init__(f"Backend invocation failed for agent {agent!r}: {type(cause).__name__}")
+        self.agent = agent
+        self.cause = cause
+        self.cause_type = type(cause).__name__

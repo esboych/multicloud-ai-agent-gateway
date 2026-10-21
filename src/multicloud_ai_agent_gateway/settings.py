@@ -37,6 +37,37 @@ class AgentEntry(BaseModel):
         return value
 
 
+class IssuerEntry(BaseModel):
+    """One trusted token issuer for ``GATEWAY_AUTH_MODE=jwt``.
+
+    ``tenant_claim`` may be a ``/``-separated path into nested claims, e.g.
+    ``kubernetes.io/namespace`` for Kubernetes ServiceAccount tokens.
+    """
+
+    issuer: str
+    audience: str | list[str]
+    jwks_uri: str | None = None
+    tenant_claim: str = "tid"
+    subject_claim: str = "sub"
+    scope_claims: list[str] = Field(default_factory=lambda: ["scp", "scope", "roles"])
+    algorithms: list[str] = Field(default_factory=lambda: ["RS256"])
+    label: str = ""
+
+    @field_validator("issuer")
+    @classmethod
+    def _issuer_not_empty(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("issuer must be non-empty")
+        return value.strip()
+
+    def audiences(self) -> tuple[str, ...]:
+        values = [self.audience] if isinstance(self.audience, str) else list(self.audience)
+        cleaned = tuple(v.strip() for v in values if v and v.strip())
+        if not cleaned:
+            raise ValueError(f"issuer {self.issuer!r}: audience must be non-empty")
+        return cleaned
+
+
 class Settings(BaseSettings):
     """Environment-driven configuration for the gateway pod."""
 
@@ -75,6 +106,24 @@ class Settings(BaseSettings):
         description=(
             "JSON object mapping primary Foundry agent names to fallback Foundry "
             "agent names, e.g. {'AzureFinOpsAgent':'AzureFinOpsAgentMini'}."
+        ),
+    )
+    foundry_fallback_replay_tool_results: bool = Field(
+        default=True,
+        description=(
+            "When a Foundry model fallback re-runs the prompt, serve tool calls that the "
+            "primary attempt already executed (same name and arguments) from a per-request "
+            "cache instead of executing them again."
+        ),
+    )
+    foundry_stream_fallback_holdback_chars: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Hold back this many characters of streamed text before releasing them to the "
+            "client, so a model rate-limit that arrives early in the stream can still switch "
+            "to the fallback agent cleanly. 0 (default) streams immediately and never "
+            "switches once text has reached the client."
         ),
     )
 
@@ -121,6 +170,13 @@ class Settings(BaseSettings):
 
     health_port: int = Field(default=8080, ge=1, le=65535)
     log_level: str = Field(default="INFO")
+    public_url: str = Field(
+        default="http://localhost:8080",
+        description=(
+            "URL under which clients reach this gateway. Advertised in the A2A agent card; "
+            "has no effect on binding."
+        ),
+    )
 
     auto_router_enabled: bool = Field(
         default=True,
@@ -150,6 +206,48 @@ class Settings(BaseSettings):
     router_llm_api_key: str = Field(default="", description="API key auth; if empty, uses workload identity.")
     router_llm_timeout_seconds: float = Field(default=5.0, gt=0.0)
 
+    # ----- Caller authentication and tenant policy ----------------------
+    auth_mode: str = Field(
+        default="none",
+        description=(
+            "'none' (default): the gateway trusts the network boundary and treats every "
+            "caller as anonymous. 'jwt': every /v1, /mcp and /a2a request must carry a bearer "
+            "token from one of auth_issuers_json; /healthz and /readyz stay open."
+        ),
+    )
+    auth_issuers_json: str = Field(
+        default="[]",
+        description="JSON list of IssuerEntry objects (issuer, audience, jwks_uri, tenant_claim, ...).",
+    )
+    auth_leeway_seconds: float = Field(default=30.0, ge=0.0)
+    auth_jwks_timeout_seconds: float = Field(default=5.0, gt=0.0)
+    tenant_policy_json: str = Field(
+        default="{}",
+        description=(
+            "JSON object mapping a tenant (the token's tenant claim) to {'agents': [...]}; "
+            "'*' is the wildcard rule. Empty means every caller may use every agent."
+        ),
+    )
+
+    # ----- Conversation store --------------------------------------------
+    conversation_store: str = Field(
+        default="memory",
+        description=(
+            "'memory' (default, per replica), 'sqlite' (conversation_store_path, survives "
+            "restarts) or 'none' (pure pass-through: no sticky AutoRouter, no ownership)."
+        ),
+    )
+    conversation_store_path: str = Field(default="", description="SQLite file for conversation_store='sqlite'.")
+    conversation_ttl_seconds: float = Field(default=86400.0, gt=0.0)
+    conversation_max_entries: int = Field(default=10_000, ge=1)
+
+    # ----- Protocol facades ------------------------------------------------
+    mcp_enabled: bool = Field(default=True, description="Serve the Model Context Protocol facade at POST /mcp.")
+    a2a_enabled: bool = Field(
+        default=True,
+        description="Serve the A2A facade at POST /a2a and the agent card at /.well-known/agent-card.json.",
+    )
+
     # Standard Azure Workload Identity env vars. These intentionally do not
     # use the GATEWAY_ prefix because AKS / azure-identity expect these names.
     azure_client_id: str = Field(
@@ -178,6 +276,24 @@ class Settings(BaseSettings):
         if normalized not in {"keyword", "bm25", "hybrid"}:
             raise ValueError(
                 f"router_mode must be one of 'keyword', 'bm25', 'hybrid'; got {value!r}"
+            )
+        return normalized
+
+    @field_validator("auth_mode")
+    @classmethod
+    def _known_auth_mode(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"none", "jwt"}:
+            raise ValueError(f"auth_mode must be 'none' or 'jwt'; got {value!r}")
+        return normalized
+
+    @field_validator("conversation_store")
+    @classmethod
+    def _known_conversation_store(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"none", "memory", "sqlite"}:
+            raise ValueError(
+                f"conversation_store must be 'none', 'memory' or 'sqlite'; got {value!r}"
             )
         return normalized
 
@@ -227,6 +343,18 @@ class Settings(BaseSettings):
             if primary_name and fallback_name:
                 mapping[primary_name] = fallback_name
         return mapping
+
+    def parsed_auth_issuers(self) -> list[IssuerEntry]:
+        try:
+            raw = json.loads(self.auth_issuers_json or "[]")
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"GATEWAY_AUTH_ISSUERS_JSON is not valid JSON: {exc}") from exc
+        if not isinstance(raw, list):
+            raise ValueError("GATEWAY_AUTH_ISSUERS_JSON must encode a JSON array")
+        entries = [IssuerEntry.model_validate(item) for item in raw]
+        for entry in entries:
+            entry.audiences()  # validate eagerly so a bad config fails at startup
+        return entries
 
 
 def load_settings() -> Settings:

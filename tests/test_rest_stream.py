@@ -109,7 +109,12 @@ def test_stream_emits_tool_events() -> None:
 
     assert [e for e, _ in events] == ["tool_started", "tool_finished", "chunk", "done"]
     assert events[0][1] == {"name": "runX", "arguments": {"a": 1}}
-    assert events[1][1] == {"name": "runX", "result": {"ok": True}, "error": None}
+    assert events[1][1] == {
+        "name": "runX",
+        "result": {"ok": True},
+        "error": None,
+        "replayed": False,
+    }
 
 
 def test_stream_emits_error_event() -> None:

@@ -65,7 +65,13 @@ def test_invoke_returns_tool_events(router_for, stub_backend) -> None:
     )
     body = response.json()
     assert body["tool_events"] == [
-        {"name": "runX", "arguments": {"a": 1}, "result": {"rows": 3}, "error": None}
+        {
+            "name": "runX",
+            "arguments": {"a": 1},
+            "result": {"rows": 3},
+            "error": None,
+            "replayed": False,
+        }
     ]
     assert body["usage"] == {"total_tokens": 7}
 

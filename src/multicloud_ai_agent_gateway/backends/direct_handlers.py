@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
@@ -48,9 +49,11 @@ def build_demo_echo_handler() -> DirectHandler:
             arguments={"prompt": prompt},
             result={"word_count": len(words)},
         )
+        # Mint a conversation id on the first turn so the demo also exercises
+        # the conversation store (sticky AutoRouter, /v1/conversations/{id}).
         return AgentReply(
             output_text=f"DemoAgent received {len(words)} word(s): {prompt}",
-            conversation_id=conversation_id,
+            conversation_id=conversation_id or f"demo-{uuid.uuid4().hex[:12]}",
             tool_events=[tool_event],
             usage={"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
             finish_reason="completed",

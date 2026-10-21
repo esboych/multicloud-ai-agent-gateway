@@ -72,3 +72,62 @@ def test_demo_agent_does_not_require_aws_bridge() -> None:
     # the AWS bridge to be configured.
     settings = Settings(agents_json=json.dumps(DEMO_AGENTS))
     build_app(settings)  # must not raise
+
+
+def test_me_is_anonymous_without_auth(client: TestClient) -> None:
+    me = client.get("/v1/me").json()
+    assert me["anonymous"] is True
+    assert me["allowed_agents"] == ["DemoAgent"]
+
+
+def test_mcp_tools_call_over_real_app(client: TestClient) -> None:
+    listed = client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).json()
+    assert [t["name"] for t in listed["result"]["tools"]] == ["DemoAgent", "AutoRouter", "route_prompt"]
+    called = client.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": "DemoAgent", "arguments": {"prompt": "hello mcp"}},
+        },
+    ).json()
+    assert called["result"]["isError"] is False
+    assert called["result"]["content"][0]["text"].endswith("hello mcp")
+
+
+def test_a2a_message_send_over_real_app(client: TestClient) -> None:
+    card = client.get("/.well-known/agent-card.json").json()
+    assert [s["id"] for s in card["skills"]] == ["AutoRouter", "DemoAgent"]
+    task = client.post(
+        "/a2a",
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "message/send",
+            "params": {
+                "message": {
+                    "role": "user",
+                    "parts": [{"kind": "text", "text": "hello a2a"}],
+                    "messageId": "m1",
+                }
+            },
+        },
+    ).json()["result"]
+    assert task["status"]["state"] == "completed"
+    assert task["metadata"]["routing"]["selected_agent"] == "DemoAgent"
+    assert task["artifacts"][0]["parts"][0]["text"].endswith("hello a2a")
+
+
+def test_sqlite_conversation_store_boots(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    for var in list(__import__("os").environ):
+        if var.startswith("GATEWAY_") or var.startswith("AZURE_"):
+            monkeypatch.delenv(var)
+    settings = Settings(
+        agents_json=json.dumps(DEMO_AGENTS),
+        conversation_store="sqlite",
+        conversation_store_path=str(tmp_path / "conversations.db"),
+    )
+    with TestClient(build_app(settings)) as client:
+        conv = client.post("/v1/chat", json={"input": "hello"}).json()["conversation_id"]
+        assert client.get(f"/v1/conversations/{conv}").json()["agent"] == "DemoAgent"

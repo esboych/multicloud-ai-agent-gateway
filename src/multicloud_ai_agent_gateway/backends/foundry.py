@@ -38,6 +38,50 @@ StreamSource = Callable[[list[dict[str, Any]], str | None], Iterable[Any]]
 EventSink = Callable[[AgentEvent], None]
 
 
+class ReplayedToolResult(dict):
+    """Marker type: a tool result served from the primary attempt's cache."""
+
+
+class ToolResultRecorder:
+    """Per-request cache that lets a model fallback reuse tool results.
+
+    A fallback re-runs the prompt from scratch on another model, which asks
+    for the same tools again. ``recording()`` wraps the real dispatcher for
+    the primary attempt and stores every successful result keyed by
+    ``(name, canonical arguments)``; ``replaying()`` serves those on the
+    fallback attempt and only executes tools the primary never ran. Failed
+    calls are not cached, so a tool that errored is retried for real.
+    """
+
+    def __init__(self, dispatcher: ToolDispatcher) -> None:
+        self._dispatcher = dispatcher
+        self._cache: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def __len__(self) -> int:
+        return len(self._cache)
+
+    @staticmethod
+    def _key(name: str, arguments: dict[str, Any]) -> tuple[str, str]:
+        return name, json.dumps(arguments, sort_keys=True, default=str)
+
+    def recording(self) -> ToolDispatcher:
+        def dispatch(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            result = self._dispatcher(name, arguments)
+            self._cache[self._key(name, arguments)] = dict(_ensure_jsonable(result))
+            return result
+
+        return dispatch
+
+    def replaying(self) -> ToolDispatcher:
+        def dispatch(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            cached = self._cache.get(self._key(name, arguments))
+            if cached is not None:
+                return ReplayedToolResult(cached)
+            return self._dispatcher(name, arguments)
+
+        return dispatch
+
+
 def run_tool_loop(
     initial_response: Any,
     *,
@@ -66,6 +110,7 @@ def run_tool_loop(
             try:
                 result = dispatcher(name, arguments)
                 event.result = _ensure_jsonable(result)
+                event.replayed = isinstance(result, ReplayedToolResult)
             except Exception as exc:  # noqa: BLE001 - report any tool failure to Foundry
                 event.error = f"{type(exc).__name__}: {exc}"
                 event.result = {"error": event.error}
@@ -157,7 +202,13 @@ def run_streaming_tool_loop(
             try:
                 result = dispatcher(name, arguments)
                 result_dict = _ensure_jsonable(result)
-                emit(ToolFinished(name=name, result=result_dict))
+                emit(
+                    ToolFinished(
+                        name=name,
+                        result=result_dict,
+                        replayed=isinstance(result, ReplayedToolResult),
+                    )
+                )
             except Exception as exc:  # noqa: BLE001 - feed any tool failure back to Foundry
                 error_text = f"{type(exc).__name__}: {exc}"
                 result_dict = {"error": error_text}
@@ -246,6 +297,8 @@ class FoundryBackend:
         request_timeout_seconds: int = 900,
         model_fallback_enabled: bool = True,
         fallback_agent_names: dict[str, str] | None = None,
+        replay_tool_results_on_fallback: bool = True,
+        stream_fallback_holdback_chars: int = 0,
     ) -> None:
         if not project_endpoint:
             raise ValueError("FoundryBackend requires a non-empty project_endpoint.")
@@ -255,6 +308,8 @@ class FoundryBackend:
         self._timeout = request_timeout_seconds
         self._model_fallback_enabled = model_fallback_enabled
         self._fallback_agent_names = dict(fallback_agent_names or {})
+        self._replay_tool_results = replay_tool_results_on_fallback
+        self._stream_holdback_chars = max(0, int(stream_fallback_holdback_chars))
         self._lock = asyncio.Lock()
         self._credential: Any = None
         self._project: Any = None
@@ -303,31 +358,48 @@ class FoundryBackend:
         prompt: str,
         conversation_id: str | None,
     ) -> AgentReply:
+        recorder = self._new_recorder()
         try:
             return self._invoke_sync_once(
                 agent_name=agent_name,
                 prompt=prompt,
                 conversation_id=conversation_id,
+                dispatcher=recorder.recording() if recorder is not None else self._dispatcher,
             )
         except Exception as exc:
             fallback_agent = self._fallback_agent_for(agent_name, exc)
             if fallback_agent is None:
                 raise
             log.warning(
-                "Foundry model rate-limited for agent %s; retrying with fallback agent %s.",
+                "Foundry model rate-limited for agent %s; retrying with fallback agent %s "
+                "(%d cached tool result(s) available for replay).",
                 agent_name,
                 fallback_agent,
+                len(recorder) if recorder is not None else 0,
             )
             reply = self._invoke_sync_once(
                 agent_name=fallback_agent,
                 prompt=prompt,
                 conversation_id=conversation_id,
+                dispatcher=recorder.replaying() if recorder is not None else self._dispatcher,
             )
             reply.tool_events.insert(
                 0,
-                _model_fallback_tool_event(agent_name, fallback_agent, exc),
+                _model_fallback_tool_event(
+                    agent_name,
+                    fallback_agent,
+                    exc,
+                    cached_tool_results=len(recorder) if recorder is not None else 0,
+                ),
             )
             return reply
+
+    def _new_recorder(self) -> ToolResultRecorder | None:
+        if self._dispatcher is None or not self._replay_tool_results:
+            return None
+        if not self._model_fallback_enabled or not self._fallback_agent_names:
+            return None
+        return ToolResultRecorder(self._dispatcher)
 
     def _invoke_sync_once(
         self,
@@ -335,6 +407,7 @@ class FoundryBackend:
         agent_name: str,
         prompt: str,
         conversation_id: str | None,
+        dispatcher: ToolDispatcher | None = None,
     ) -> AgentReply:
         openai = self._project.get_openai_client()
         agent_reference = {
@@ -361,7 +434,7 @@ class FoundryBackend:
         return run_tool_loop(
             initial,
             respond_fn=respond_fn,
-            dispatcher=self._dispatcher,
+            dispatcher=dispatcher if dispatcher is not None else self._dispatcher,
             max_rounds=self._max_rounds,
         )
 
@@ -393,36 +466,52 @@ class FoundryBackend:
         conversation_id: str | None,
         emit: EventSink,
     ) -> None:
-        tracker = _OutputTracker(emit)
+        recorder = self._new_recorder()
+        tracker = _OutputTracker(emit, holdback_chars=self._stream_holdback_chars)
         try:
             self._stream_sync_once(
                 agent_name=agent_name,
                 prompt=prompt,
                 conversation_id=conversation_id,
                 emit=tracker,
+                dispatcher=recorder.recording() if recorder is not None else self._dispatcher,
             )
+            tracker.flush()
             return
         except Exception as exc:
             fallback_agent = self._fallback_agent_for(agent_name, exc)
             if fallback_agent is None:
+                tracker.flush()
                 raise
             if tracker.output_started:
-                # Text or tool events already reached the client. Restarting
-                # the prompt on another model would splice two answers into
-                # one stream, so surface the error instead.
+                # Answer text already reached the client. Restarting the
+                # prompt on another model would splice two answers into one
+                # stream, so surface the error instead. Raise the window
+                # with stream_fallback_holdback_chars if this bites.
                 log.warning(
                     "Foundry streaming model rate-limited for agent %s after output "
                     "had started; not retrying with %s.",
                     agent_name,
                     fallback_agent,
                 )
+                tracker.flush()
                 raise
+            # Anything the primary produced is still held back: drop it, the
+            # fallback answer starts from a clean slate.
+            tracker.discard()
             log.warning(
-                "Foundry streaming model rate-limited for agent %s; retrying with fallback agent %s.",
+                "Foundry streaming model rate-limited for agent %s; retrying with fallback "
+                "agent %s (%d cached tool result(s) available for replay).",
                 agent_name,
                 fallback_agent,
+                len(recorder) if recorder is not None else 0,
             )
-            event = _model_fallback_tool_event(agent_name, fallback_agent, exc)
+            event = _model_fallback_tool_event(
+                agent_name,
+                fallback_agent,
+                exc,
+                cached_tool_results=len(recorder) if recorder is not None else 0,
+            )
             emit(ToolStarted(name=event.name, arguments=event.arguments))
             emit(ToolFinished(name=event.name, result=event.result, error=event.error))
             self._stream_sync_once(
@@ -430,6 +519,7 @@ class FoundryBackend:
                 prompt=prompt,
                 conversation_id=conversation_id,
                 emit=emit,
+                dispatcher=recorder.replaying() if recorder is not None else self._dispatcher,
             )
 
     def _stream_sync_once(
@@ -439,6 +529,7 @@ class FoundryBackend:
         prompt: str,
         conversation_id: str | None,
         emit: EventSink,
+        dispatcher: ToolDispatcher | None = None,
     ) -> None:
         openai = self._project.get_openai_client()
         agent_reference = {
@@ -469,7 +560,7 @@ class FoundryBackend:
         run_streaming_tool_loop(
             initial_stream=initial_stream,
             respond_stream_fn=respond_stream_fn,
-            dispatcher=self._dispatcher,
+            dispatcher=dispatcher if dispatcher is not None else self._dispatcher,
             max_rounds=self._max_rounds,
             emit=emit,
         )
@@ -497,16 +588,51 @@ class FoundryBackend:
 
 
 class _OutputTracker:
-    """EventSink wrapper that remembers whether client-visible output began."""
+    """EventSink wrapper that remembers whether answer text reached the client.
 
-    def __init__(self, emit: EventSink) -> None:
+    With ``holdback_chars > 0`` the first text deltas are buffered instead of
+    forwarded, until that many characters have accumulated, a tool event
+    arrives, or the stream completes. While text is still held back a model
+    rate-limit can switch to the fallback agent without the client ever
+    seeing a spliced answer; ``discard()`` drops the buffer in that case.
+    """
+
+    def __init__(self, emit: EventSink, *, holdback_chars: int = 0) -> None:
         self._emit = emit
+        self._holdback = max(0, int(holdback_chars))
+        self._buffer: list[TextChunk] = []
+        self._buffered_chars = 0
         self.output_started = False
 
     def __call__(self, event: AgentEvent) -> None:
-        if isinstance(event, (TextChunk, ToolStarted)):
-            self.output_started = True
+        if isinstance(event, TextChunk):
+            if self.output_started or self._holdback == 0:
+                self.output_started = True
+                self._emit(event)
+                return
+            self._buffer.append(event)
+            self._buffered_chars += len(event.text)
+            if self._buffered_chars >= self._holdback:
+                self.flush()
+            return
+        # Tool events and terminal events release anything held back first
+        # so ordering on the wire matches what the model produced. Tool
+        # events alone do not commit the stream: a fallback after them is
+        # coherent because the fallback run replays the same tools (marked
+        # ``replayed``) before producing its own text.
+        self.flush()
         self._emit(event)
+
+    def flush(self) -> None:
+        if not self._buffer:
+            return
+        buffered, self._buffer, self._buffered_chars = self._buffer, [], 0
+        self.output_started = True
+        for chunk in buffered:
+            self._emit(chunk)
+
+    def discard(self) -> None:
+        self._buffer, self._buffered_chars = [], 0
 
 
 # ---------------------------------------------------------------------------
@@ -647,6 +773,8 @@ def _json_args(value: Any) -> dict[str, Any]:
 
 
 def _ensure_jsonable(value: Any) -> dict[str, Any]:
+    if isinstance(value, ReplayedToolResult):
+        return dict(value)
     if isinstance(value, dict):
         return value
     return {"result": value}
@@ -676,6 +804,8 @@ def _model_fallback_tool_event(
     primary_agent: str,
     fallback_agent: str,
     exc: Exception,
+    *,
+    cached_tool_results: int = 0,
 ) -> ToolEvent:
     return ToolEvent(
         name="model_fallback",
@@ -689,6 +819,7 @@ def _model_fallback_tool_event(
             "primary_agent": primary_agent,
             "fallback_agent": fallback_agent,
             "error_type": type(exc).__name__,
+            "cached_tool_results": cached_tool_results,
         },
         error=None,
     )

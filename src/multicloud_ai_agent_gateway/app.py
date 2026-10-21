@@ -7,6 +7,7 @@ from typing import AsyncIterator
 from fastapi import FastAPI
 
 from multicloud_ai_agent_gateway import __version__
+from multicloud_ai_agent_gateway.auth import IssuerConfig, JwtAuthenticator, TenantPolicy
 from multicloud_ai_agent_gateway.backends.agentcore import AgentCoreBackend
 from multicloud_ai_agent_gateway.backends.direct import DirectBackend, DirectHandler
 from multicloud_ai_agent_gateway.backends.direct_handlers import (
@@ -31,6 +32,13 @@ from multicloud_ai_agent_gateway.core import (
     Router,
     load_dispatcher,
 )
+from multicloud_ai_agent_gateway.core.conversations import (
+    ConversationStore,
+    build_conversation_store,
+)
+from multicloud_ai_agent_gateway.core.service import GatewayService
+from multicloud_ai_agent_gateway.frontends.a2a import mount_a2a
+from multicloud_ai_agent_gateway.frontends.mcp import mount_mcp
 from multicloud_ai_agent_gateway.frontends.rest import build_rest_app
 from multicloud_ai_agent_gateway.settings import AgentEntry, Settings, load_settings
 
@@ -62,6 +70,8 @@ def _build_router(settings: Settings) -> Router:
             request_timeout_seconds=settings.foundry_request_timeout_seconds,
             model_fallback_enabled=settings.foundry_model_fallback_enabled,
             fallback_agent_names=settings.parsed_foundry_fallback_agents(),
+            replay_tool_results_on_fallback=settings.foundry_fallback_replay_tool_results,
+            stream_fallback_holdback_chars=settings.foundry_stream_fallback_holdback_chars,
         )
 
     # The AWS bridge is shared by the AgentCore (LLM-planned) and direct
@@ -324,20 +334,104 @@ def _build_gcp_direct_handlers(
     return handlers
 
 
+def _build_authenticator(settings: Settings) -> JwtAuthenticator | None:
+    if settings.auth_mode == "none":
+        return None
+    entries = settings.parsed_auth_issuers()
+    if not entries:
+        raise RuntimeError(
+            "GATEWAY_AUTH_MODE=jwt but GATEWAY_AUTH_ISSUERS_JSON is empty. "
+            "List at least one issuer (issuer, audience, optional jwks_uri)."
+        )
+    issuers = [
+        IssuerConfig(
+            issuer=entry.issuer,
+            audience=entry.audiences(),
+            jwks_uri=entry.jwks_uri,
+            tenant_claim=entry.tenant_claim,
+            subject_claim=entry.subject_claim,
+            scope_claims=tuple(entry.scope_claims),
+            algorithms=tuple(entry.algorithms),
+            label=entry.label,
+        )
+        for entry in entries
+    ]
+    return JwtAuthenticator(
+        issuers,
+        leeway_seconds=settings.auth_leeway_seconds,
+        http_timeout_seconds=settings.auth_jwks_timeout_seconds,
+    )
+
+
+def _build_policy(settings: Settings) -> TenantPolicy | None:
+    policy = TenantPolicy.from_json(settings.tenant_policy_json)
+    if policy is not None and settings.auth_mode == "none":
+        log.warning(
+            "GATEWAY_TENANT_POLICY_JSON is set but GATEWAY_AUTH_MODE=none: every caller is "
+            "anonymous, so only the '*' rule can ever apply."
+        )
+    return policy
+
+
+def _build_conversation_store(settings: Settings) -> ConversationStore:
+    return build_conversation_store(
+        settings.conversation_store,
+        path=settings.conversation_store_path,
+        ttl_seconds=settings.conversation_ttl_seconds,
+        max_entries=settings.conversation_max_entries,
+    )
+
+
+def build_service(settings: Settings) -> GatewayService:
+    """Router plus policy and conversation store: the object every facade shares."""
+    return GatewayService(
+        _build_router(settings),
+        policy=_build_policy(settings),
+        conversations=_build_conversation_store(settings),
+    )
+
+
 def build_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or load_settings()
     logging.basicConfig(level=settings.log_level.upper())
-    router = _build_router(settings)
+    service = build_service(settings)
+    authenticator = _build_authenticator(settings)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        log.info("Multicloud AI Agent Gateway starting (version=%s)", __version__)
+        log.info(
+            "Multicloud AI Agent Gateway starting (version=%s, auth=%s, conversations=%s, mcp=%s, a2a=%s)",
+            __version__,
+            settings.auth_mode,
+            settings.conversation_store,
+            settings.mcp_enabled,
+            settings.a2a_enabled,
+        )
         try:
             yield
         finally:
             log.info("Multicloud AI Agent Gateway shutting down")
-            await router.aclose()
+            await service.aclose()
 
-    app = build_rest_app(router=router, gateway_version=__version__)
+    app = build_rest_app(
+        service=service,
+        gateway_version=__version__,
+        authenticator=authenticator,
+    )
+    if settings.mcp_enabled:
+        mount_mcp(
+            app,
+            service=service,
+            gateway_version=__version__,
+            authenticator=authenticator,
+        )
+    if settings.a2a_enabled:
+        mount_a2a(
+            app,
+            service=service,
+            gateway_version=__version__,
+            public_url=settings.public_url,
+            authenticator=authenticator,
+        )
     app.router.lifespan_context = lifespan
     return app
