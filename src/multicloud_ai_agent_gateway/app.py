@@ -276,7 +276,7 @@ def _build_direct_handlers(
         if key in handlers:
             continue  # multiple agents may share one handler
         if key == "demo_echo":
-            handlers[key] = build_demo_echo_handler()
+            handlers[key] = build_demo_echo_handler(delay_ms=settings.demo_echo_delay_ms)
         elif key == "aws_cost_mtd_by_service":
             if aws_bridge is None:
                 raise RuntimeError(

@@ -200,8 +200,11 @@ front, before consumers outside that boundary can reach it.
 ## Testing
 
 ```bash
-pytest -q          # all offline: fakes for Entra, STS, Foundry, AgentCore, BigQuery, JWKS
-ruff check src tests examples
+pytest -q                 # unit + in-process API tests, all offline (~340)
+pytest -q -m integration  # real gateway processes over HTTP, incl. JWT against a local JWKS issuer
+pytest -q -s -m load      # 10 concurrent users over REST / SSE / MCP / A2A
+python scripts/loadtest.py --url http://localhost:8080 --users 25 --requests 40
+ruff check src tests examples scripts
 ```
 
 Transport-and-shape logic per backend is factored into pure functions

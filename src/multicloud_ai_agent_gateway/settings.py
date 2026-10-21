@@ -170,6 +170,14 @@ class Settings(BaseSettings):
 
     health_port: int = Field(default=8080, ge=1, le=65535)
     log_level: str = Field(default="INFO")
+    demo_echo_delay_ms: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Artificial latency for the demo_echo direct handler, to simulate a slow "
+            "backend in integration and load tests. 0 = no delay."
+        ),
+    )
     public_url: str = Field(
         default="http://localhost:8080",
         description=(

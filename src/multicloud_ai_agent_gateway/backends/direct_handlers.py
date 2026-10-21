@@ -33,16 +33,20 @@ from multicloud_ai_agent_gateway.core.backend import AgentReply, ToolEvent
 log = logging.getLogger(__name__)
 
 
-def build_demo_echo_handler() -> DirectHandler:
+def build_demo_echo_handler(*, delay_ms: int = 0) -> DirectHandler:
     """Return a handler that echoes the prompt without touching any cloud.
 
     Exists so ``python -m multicloud_ai_agent_gateway`` has something to serve
     on a laptop with no cloud credentials, and so the full request/response
     shape (``output_text``, ``tool_events``, ``usage``, ``routing``) can be
-    exercised end to end in tests.
+    exercised end to end in tests. ``delay_ms`` sleeps (without blocking the
+    event loop) to stand in for a slow backend in load tests.
     """
+    delay_seconds = max(0, int(delay_ms)) / 1000.0
 
     async def handler(prompt: str, conversation_id: str | None) -> AgentReply:
+        if delay_seconds:
+            await asyncio.sleep(delay_seconds)
         words = prompt.split()
         tool_event = ToolEvent(
             name="demo_echo",

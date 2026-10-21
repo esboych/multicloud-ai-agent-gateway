@@ -63,6 +63,14 @@ where = ["src"]
 testpaths = ["tests"]
 pythonpath = ["src", "."]
 asyncio_mode = "auto"
+# Default run = fast in-process suite. `pytest -m integration` starts real
+# gateway processes on localhost; `pytest -m load` drives them with
+# concurrent users. Both stay offline (no cloud), see tests/README.md.
+addopts = "-m 'not integration and not load'"
+markers = [
+  "integration: black-box tests against a gateway process over real HTTP",
+  "load: concurrent-user load checks against a gateway process",
+]
 
 [tool.ruff]
 line-length = 100

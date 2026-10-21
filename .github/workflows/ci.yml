@@ -19,8 +19,23 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - run: pip install -c constraints.txt -e ".[dev]"
-      - run: ruff check src tests examples
+      - run: ruff check src tests examples scripts
       - run: pytest -q
+
+  integration:
+    # Black-box: real gateway processes on localhost (anonymous and
+    # JWT-authenticated against a local JWKS issuer), then 10 concurrent
+    # users over REST / SSE / MCP / A2A. Still no cloud access.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -c constraints.txt -e ".[dev]"
+      - run: pytest -q -m integration
+      - run: pytest -q -s -m load
 
   docker:
     runs-on: ubuntu-latest

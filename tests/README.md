@@ -4,10 +4,28 @@
 
 ```bash
 pip install -e ".[dev]"
-pytest -q
+pytest -q                     # unit + in-process API tests (default)
+pytest -q -m integration      # black-box: real gateway processes over HTTP
+pytest -q -s -m load          # 10 concurrent users against those processes
 ```
 
-All tests are offline. No real Foundry, AAD, AWS, GCP or JWKS calls.
+Three layers, all offline (no Foundry, AAD, AWS, GCP or public JWKS):
+
+| Layer | What runs | Where |
+|---|---|---|
+| unit / in-process | pure functions and FastAPI `TestClient` against the real app, backends faked | `tests/test_*.py` |
+| integration | `python -m multicloud_ai_agent_gateway` started as a subprocess on a free port, sqlite conversation store, real HTTP / SSE; a second process with `GATEWAY_AUTH_MODE=jwt` validates tokens against a local OIDC issuer (discovery document + JWKS served over HTTP), so the production `JwksKeyResolver` path is exercised | `tests/integration/test_live_gateway.py` |
+| load | `scripts/loadtest.py` driven by pytest: 10 users × 30 requests, mixed `invoke` / `chat` (sticky continuation) / `stream` / `mcp` / `a2a`; once against the instant demo agent, once against a 100 ms-slow agent to prove requests overlap instead of serialising | `tests/integration/test_load.py` |
+
+`GATEWAY_INTEGRATION_URL=http://host:port pytest -m integration` runs the
+anonymous black-box tests against an already running gateway (for example
+a port-forwarded cluster service); tests that need the fixture's exact
+agent list or auth config skip themselves.
+
+`scripts/loadtest.py --url ... --users 25 --requests 40 --mix invoke=4,stream=2`
+is the same generator as a standalone tool, with p50 / p95 / p99 per
+operation, throughput and a JSON report (`--json`). It measures the gateway
+itself; with real cloud agents the numbers are dominated by the model.
 
 ## What is covered
 
